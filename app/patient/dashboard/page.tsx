@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useRouter } from 'next/navigation';
+import EmergencyServicesCard from '@/components/emergency/EmergencyServiceCard';
 import ProtectedRoute from '@/components/auth/ProtectedRoute';
 import { 
   Calendar, 
@@ -243,6 +244,7 @@ export default function PatientDashboard() {
                 Manage Meds <ArrowRight className="w-4 h-4 ml-1" />
               </div>
             </div>
+            <EmergencyServicesCard />
           </div>
 
           {/* Hospitals You've Visited */}
@@ -255,13 +257,13 @@ export default function PatientDashboard() {
               <div className="p-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {uniqueHospitals.map((hospital) => (
-                    <div key={hospital.id || hospital.name} className="bg-gray-50 p-4 rounded-lg hover:bg-gray-100 transition-colors">
+                    <div key={hospital.id || hospital?.name} className="bg-gray-50 p-4 rounded-lg hover:bg-gray-100 transition-colors">
                       <div className="flex items-center gap-3 mb-2">
                         <Hospital className="w-5 h-5 text-blue-600" />
-                        <h4 className="font-semibold text-gray-900">{hospital.name}</h4>
+                        <h4 className="font-semibold text-gray-900">{hospital?.name}</h4>
                       </div>
                       <p className="text-sm text-gray-600">
-                        {Object.values(hospital.address || {}).join(', ') || 'Address not listed'}
+                        {Object.values(hospital?.address || {}).join(', ') || 'Address not listed'}
                       </p>
                       <button
                         onClick={() => router.push(`/hospital/${hospital.id}`)}

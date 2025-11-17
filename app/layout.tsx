@@ -1,9 +1,16 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono,Inter } from "next/font/google";
 import MainLayout from '@/components/layout/MainLayout';
 import {ErrorBoundary} from "@/components/ErrorBoundary";
 import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
+
+const inter = Inter({
+  variable: "--font-inter",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  display: "swap",               // show fallback instantly
+});
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],

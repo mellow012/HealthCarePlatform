@@ -5,33 +5,47 @@ import { cookies } from 'next/headers';
 
 export async function GET(req: NextRequest) {
   try {
-    const token = (await cookies()).get('session')?.value;
-    if (!token) {
-      console.log('No session token found');
-      return NextResponse.json({ error: 'Unauthorized - No session token' }, { status: 401 });
+    const sessionCookie = (await cookies()).get('session')?.value;
+    if (!sessionCookie) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const decoded = await adminAuth.verifySessionCookie(token);
-    console.log('Session verified for UID:', decoded.uid);
+    // Verify session
+    const decoded = await adminAuth.verifySessionCookie(sessionCookie);
+    const uid = decoded.uid;
 
-    const userDoc = await adminDb.collection('users').doc(decoded.uid).get();
-    if (!userDoc.exists) {
-      console.log('User doc not found for UID:', decoded.uid);
+    // Get user data
+    const userSnap = await adminDb.collection('users').doc(uid).get();
+    if (!userSnap.exists) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
-    const userData = userDoc.data();
-    console.log('User data:', { role: userData?.role, hospitalId: userData?.hospitalId });
+    const userData = userSnap.data()!;
+    const role = userData.role as string;
+    const hospitalId = userData.hospitalId as string;
 
-    if (userData?.role !== 'hospital_admin' || !userData.hospitalId) {
-      console.log('Role or hospitalId invalid:', { role: userData?.role, hospitalId: userData?.hospitalId });
-      return NextResponse.json({ error: 'Forbidden - Invalid role or hospital' }, { status: 403 });
+    // Define roles that can access active visits
+    const ALLOWED_ROLES = [
+      'hospital_admin',
+      'receptionist',
+      'doctor',
+      'nurse',
+      'pharmacist',
+      'lab_tech',
+      'billing',
+      'records_officer',
+    ] as const;
+
+    if (!hospitalId || !ALLOWED_ROLES.includes(role as any)) {
+      console.log('Access denied:', { uid, role, hospitalId });
+      return NextResponse.json(
+        { error: 'Forbidden – insufficient permissions' },
+        { status: 403 }
+      );
     }
 
-    const hospitalId = userData.hospitalId;
-    console.log('Fetching visits for hospitalId:', hospitalId);
-
-    const visitsSnapshot = await adminDb
+    // Fetch active (checked-in) visits
+    const visitsSnap = await adminDb
       .collection('visits')
       .where('hospitalId', '==', hospitalId)
       .where('status', '==', 'checked_in')
@@ -39,43 +53,53 @@ export async function GET(req: NextRequest) {
       .limit(50)
       .get();
 
-    console.log('Visits snapshot size:', visitsSnapshot.size);
-
     const visits = await Promise.all(
-      visitsSnapshot.docs.map(async (doc) => {
-        const visitData = doc.data();
-        console.log('Processing visit:', doc.id, visitData);
+      visitsSnap.docs.map(async (doc) => {
+        const data = doc.data();
 
-        const patientDoc = await adminDb.collection('users').doc(visitData.patientId).get();
-        const patientData = patientDoc.data() || {};
+        // Fetch patient name
+        let patientName = 'Unknown Patient';
+        let patientEmail = '';
 
-        // Safe timestamp handling
+        if (data.patientId) {
+          const patientSnap = await adminDb.collection('users').doc(data.patientId).get();
+          if (patientSnap.exists) {
+            const p = patientSnap.data()!;
+            patientName = `${p.profile?.firstName || ''} ${p.profile?.lastName || ''}`.trim() || 'Unknown Patient';
+            patientEmail = p.email || '';
+          }
+        }
+
+        // Format check-in time
         let checkInTime = null;
-        if (visitData.checkInTime && visitData.checkInTime.toDate) {
-          checkInTime = visitData.checkInTime.toDate().toISOString();
-        } else if (typeof visitData.checkInTime === 'string') {
-          checkInTime = visitData.checkInTime;
+        if (data.checkInTime) {
+          if (typeof data.checkInTime.toDate === 'function') {
+            checkInTime = data.checkInTime.toDate().toISOString();
+          } else {
+            checkInTime = new Date(data.checkInTime).toISOString();
+          }
         }
 
         return {
           id: doc.id,
-          ...visitData,
-          checkInTime,
+          patientId: data.patientId,
           patient: {
-            name: `${patientData.profile?.firstName || ''} ${patientData.profile?.lastName || ''}`.trim() || 'Unknown Patient',
-            email: patientData.email || '',
+            name: patientName,
+            email: patientEmail,
           },
+          reason: data.reason || 'General Checkup',
+          checkInTime,
+          queueNumber: data.queueNumber || null,
         };
       })
     );
 
-    console.log('Processed visits count:', visits.length);
     return NextResponse.json({ success: true, data: visits });
   } catch (error: any) {
-    console.error('Error fetching active visits:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: error.message || 'Failed to fetch active visits' 
-    }, { status: 500 });
+    console.error('GET /api/visits/active error:', error);
+    return NextResponse.json(
+      { error: 'Internal server error', details: error.message },
+      { status: 500 }
+    );
   }
 }

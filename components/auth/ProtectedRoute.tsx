@@ -1,15 +1,14 @@
 'use client';
 
-// Changed to a relative path as a workaround for the alias resolution error.
-// !!! Adjust this path if AuthContext is elsewhere relative to components/auth !!!
-import { useAuth } from '../../contexts/AuthContext'; 
+import { useAuth } from '@/contexts/AuthContext';
 import { useRouter, usePathname } from 'next/navigation';
 import { useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
+import { getRoleBasedRedirect } from '@/contexts/AuthContext';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
-  allowedRoles?: string[];
+  allowedRoles: string[];
   requireSetup?: boolean;
 }
 
@@ -20,44 +19,66 @@ export default function ProtectedRoute({
 }: ProtectedRouteProps) {
   const { user, userData, loading } = useAuth();
   const router = useRouter();
-  const pathname = usePathname(); 
+  const pathname = usePathname();
 
   useEffect(() => {
-    if (!loading) {
-      if (!user) {
-        // 1. Not authenticated: Redirect to login
-        router.push('/login');
-        
-      } else if (userData && !userData.setupComplete && pathname !== '/auth/profile' && requireSetup && userData.role === 'patient') {
-        // 2. Patient requires profile setup: Redirect to setup page
-        // Note: '/auth/profile' matches the path of app/auth/profile/page.tsx
-        router.push('/auth/profile');
-      
-      } else if (allowedRoles && userData && !allowedRoles.includes(userData.role)) {
-        // 3. Unauthorized role: Redirect to unauthorized page
-        router.push('/unauthorized');
+    if (loading || !userData) return;
 
-      } else if (requireSetup && userData?.role === 'hospital_admin' && !userData.setupComplete && pathname !== '/hospital/setup') {
-        // 4. Hospital Admin requires specific setup
-        router.push('/hospital/setup');
-      }
-    
+    if (!user) {
+      router.push('/auth/login');
+      return;
     }
-  }, [user, userData, loading, router, pathname, allowedRoles, requireSetup]);
 
-  if (loading || (user && !userData)) {
-    // Show a loading screen while fetching user data or initial auth is incomplete
+    const userRole = (userData.role || '').toLowerCase();
+    const allowedLower = allowedRoles.map(r => r.toLowerCase());
+
+    // Not allowed on this page
+    if (!allowedLower.includes(userRole)) {
+      const correctPath = getRoleBasedRedirect(userData.role, userData.setupComplete ?? true);
+      router.replace(correctPath);
+      return;
+    }
+
+    // Needs setup
+    if (requireSetup && !userData.setupComplete) {
+      if (userRole === 'hospital_admin') {
+        router.replace('/hospital/setup');
+      } else if (['doctor', 'receptionist', 'hospital_staff'].includes(userRole)) {
+        router.replace('/hospital/staff/setup');
+      }
+      return;
+    }
+
+    // If they're on setup page but already done → kick them out
+    if (userData.setupComplete && pathname.includes('/staff/setup')) {
+      const correctPath = getRoleBasedRedirect(userData.role, true);
+      router.replace(correctPath);
+    }
+
+  }, [user, userData, loading, allowedRoles, requireSetup, router, pathname]);
+
+  if (loading || !userData) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <Loader2 className="animate-spin rounded-full h-12 w-12 border-b-2 text-blue-600" />
+        <div className="text-center">
+          <Loader2 className="w-12 h-12 animate-spin text-blue-600 mx-auto mb-4" />
+          <p className="text-gray-600">Loading...</p>
+        </div>
       </div>
     );
   }
 
-  // If unauthenticated or unauthorized role (handled in useEffect, but we block rendering until then)
-  if (!user || (allowedRoles && userData && !allowedRoles.includes(userData.role))) {
-    return null;
+  const userRole = (userData.role || '').toLowerCase();
+  if (allowedRoles.map(r => r.toLowerCase()).includes(userRole)) {
+    return <>{children}</>;
   }
 
-  return <>{children}</>;
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="text-center">
+        <Loader2 className="w-12 h-12 animate-spin text-blue-600 mx-auto mb-4" />
+        <p className="text-gray-600">Redirecting...</p>
+      </div>
+    </div>
+  );
 }

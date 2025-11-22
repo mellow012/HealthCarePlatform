@@ -1,162 +1,119 @@
 // app/api/patient/ehealth-passport/route.ts
-import { NextResponse, NextRequest } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebase/admin";
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb,adminAuth } from '@/lib/firebase/admin';
 import { cookies } from 'next/headers';
-import { FieldValue } from 'firebase-admin/firestore';
 
-// Helper to verify session cookie
-async function verifySession(token: string | undefined) {
-  if (!token) return null;
+
+async function verifyPatient(session: string | undefined) {
+  if (!session) return null;
+
   try {
-    return await adminAuth.verifySessionCookie(token, true); // true = check revoked
+    // Use adminAuth, NOT adminDb.auth()
+    const decoded = await adminAuth.verifySessionCookie(session, true);
+
+    const userSnap = await adminDb.collection('users').doc(decoded.uid).get();
+    const userData = userSnap.data();
+
+    if (userSnap.exists && userData?.role === 'patient') {
+      return decoded.uid;
+    }
+    return null;
   } catch (error) {
     console.error('Session verification failed:', error);
     return null;
   }
 }
 
-// ============================================== GET - Fetch Passport
 export async function GET(req: NextRequest) {
   try {
-    const token = ( await cookies()).get('session')?.value;
-    const decodedToken = await verifySession(token);
-    if (!decodedToken) {
+    const sessionCookie = (await cookies()).get('session')?.value;
+    const patientId = await verifyPatient(sessionCookie);
+
+    if (!patientId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Verify role
-    const userDoc = await adminDb.collection('users').doc(decodedToken.uid).get();
-    if (!userDoc.exists || userDoc.data()?.role !== 'patient') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    // 1. Fetch patient's personal info
+    const userDoc = await adminDb.collection('users').doc(patientId).get();
+    const personalInfo = userDoc.data() || {};
 
-    // Get E-Health Passport
-    const passportDoc = await adminDb.collection('eHealthPassports').doc(decodedToken.uid).get();
+    // 2. Fetch all visits (for diagnoses)
+    const visitsSnap = await adminDb
+      .collection('visits')
+      .where('patientId', '==', patientId)
+      .orderBy('createdAt', 'desc')
+      .get();
 
-    if (!passportDoc.exists) {
-      return NextResponse.json({
-        success: true,
-        message: 'E-Health Passport not activated yet',
-        data: {
-          isActive: false,
-          message: 'Your E-Health Passport will be activated on your first hospital visit',
-          consent: { dataSharing: false, emergencyAccess: false }, // Defaults
-        },
-      });
-    }
-
-    const passportData = passportDoc.data();
-
-    // Get hospital names for visit history (only if hospitals array exists)
-    const hospitalIds = Array.isArray(passportData?.visitHistory?.hospitals) ? passportData.visitHistory.hospitals : [];
-    const hospitals = await Promise.all(
-      hospitalIds.map(async (hospitalId: string) => {
-        const hospitalDoc = await adminDb.collection('hospitals').doc(hospitalId).get();
-        const hospitalData = hospitalDoc.data() || {};
+    const diagnoses = visitsSnap.docs
+      .filter(doc => doc.data().diagnosis?.trim())
+      .map(doc => {
+        const d = doc.data();
         return {
-          id: hospitalId,
-          name: hospitalData.name || 'Unknown Hospital',
-          address: hospitalData.address || {},
+          condition: d.diagnosis || 'Unknown condition',
+          date: d.createdAt?.toDate?.().toISOString() || new Date().toISOString(),
+          diagnosedBy: d.doctorName || 'Unknown Doctor',
+          visitId: doc.id,
         };
-      })
-    );
+      });
+
+    // 3. Fetch active prescriptions
+    const prescriptionsSnap = await adminDb
+      .collection('prescriptions')
+      .where('patientId', '==', patientId)
+      .where('status', '==', 'active')
+      .orderBy('createdAt', 'desc')
+      .get();
+
+    const prescriptions = prescriptionsSnap.docs.map(doc => {
+      const p = doc.data();
+      const dosage = p.dosage;
+
+      // Build human-readable dosage string
+      const dosageParts = [];
+      if (dosage.quantity) dosageParts.push(`${dosage.quantity} ${dosage.unit || ''}`);
+      if (dosage.timing) dosageParts.push(dosage.timing.replace('_', ' '));
+      if (dosage.frequency) {
+        const freq = dosage.frequency === 'three_times_daily' ? '3 times daily'
+                   : dosage.frequency.replace('_', ' ');
+        dosageParts.push(freq);
+      }
+
+      const dosageStr = dosageParts.join(', ') || 'As directed';
+
+      // Duration string
+      const duration = p.duration;
+      const durationStr = duration?.value
+        ? `${duration.value} ${duration.unit}`
+        : 'Unknown duration';
+
+      return {
+        id: doc.id,
+        medication: `${p.medication?.name || p.medication?.genericName} ${p.medication?.strength || ''}`.trim(),
+        dosage: dosageStr,
+        frequency: dosage.frequency || '',
+        duration: durationStr,
+        prescribedDate: p.createdAt?.toDate?.().toISOString() || new Date().toISOString(),
+        prescribedBy: p.doctorName || 'Unknown Doctor',
+        instructions: p.instructions || '',
+        raw: p, // optional: keep raw data if you want more control on frontend
+      };
+    });
 
     return NextResponse.json({
       success: true,
       data: {
-        ...passportData,
-        visitHistory: {
-          ...passportData.visitHistory,
-          hospitalsDetails: hospitals,
+        personalInfo: {
+          firstName: personalInfo.firstName || '',
+          lastName: personalInfo.lastName || '',
+          bloodType: personalInfo.bloodType || null,
+          // add more fields as needed
         },
-        activatedAt: passportData?.activatedAt?.toDate().toISOString(),
-        createdAt: passportData?.createdAt?.toDate().toISOString(),
-        updatedAt: passportData?.updatedAt?.toDate().toISOString(),
+        diagnoses,
+        prescriptions,
       },
     });
-  } catch (error: any) {
-    console.error('Error fetching E-Health Passport:', error);
-    return NextResponse.json(
-      { error: error.message || 'Failed to fetch E-Health Passport' },
-      { status: 500 }
-    );
+  } catch (err: any) {
+    console.error('GET /api/patient/ehealth-passport', err);
+    return NextResponse.json({ error: err.message || 'Server error' }, { status: 500 });
   }
-}
-
-// ============================================== PUT - Update Passport
-export async function PUT(req: NextRequest) {
-  try {
-    const token = (await cookies()).get('session')?.value;
-    const decodedToken = await verifySession(token);
-    if (!decodedToken) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    // Verify role
-    const userDoc = await adminDb.collection('users').doc(decodedToken.uid).get();
-    if (!userDoc.exists || userDoc.data()?.role !== 'patient') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
-
-    const updates = await req.json();
-
-    // Validate updates
-    if (typeof updates !== 'object' || Object.keys(updates).length === 0) {
-      return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
-    }
-
-    // Validate that passport exists
-    const passportRef = adminDb.collection('eHealthPassports').doc(decodedToken.uid);
-    const passportDoc = await passportRef.get();
-
-    if (!passportDoc.exists) {
-      return NextResponse.json(
-        { error: 'E-Health Passport not activated yet' },
-        { status: 404 }
-      );
-    }
-
-    const existingData = passportDoc.data() || {};
-    const currentVersion = existingData.version || 1;
-
-    // Update passport (merge to avoid overwrites)
-    await passportRef.update({
-      ...updates,
-      updatedAt: FieldValue.serverTimestamp(),
-      version: currentVersion + 1,
-    });
-
-    // Audit log
-    await adminDb.collection('auditLogs').add({
-      userId: decodedToken.uid,
-      action: 'EHEALTH_PASSPORT_UPDATED',
-      resourceType: 'eHealthPassport',
-      resourceId: decodedToken.uid,
-      metadata: { 
-        updatedFields: Object.keys(updates),
-        previousVersion: currentVersion,
-      },
-      timestamp: FieldValue.serverTimestamp(),
-    });
-
-    return NextResponse.json({
-      success: true,
-      message: 'E-Health Passport updated successfully',
-      data: { version: currentVersion + 1 },
-    });
-  } catch (error: any) {
-    console.error('Error updating E-Health Passport:', error);
-    if (error.code === 'permission-denied') {
-      return NextResponse.json({ error: 'Insufficient permissions' }, { status: 403 });
-    }
-    return NextResponse.json(
-      { error: error.message || 'Failed to update E-Health Passport' },
-      { status: 500 }
-    );
-  }
-}
-
-// Optional: PATCH for partial updates
-export async function PATCH(req: NextRequest) {
-  return PUT(req); // Reuse PUT logic
 }

@@ -20,6 +20,7 @@ import {
   Brain,
   Pill
 } from 'lucide-react';
+import CurrentVisitCard from '../visits/current/page';
 
 interface Visit {
   id: string;
@@ -277,6 +278,8 @@ export default function PatientDashboard() {
               </div>
             </div>
           )}
+
+          <CurrentVisitCard />
 
           {/* Recent Visits */}
           <div className="bg-white rounded-xl shadow-lg overflow-hidden">

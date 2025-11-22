@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
@@ -14,17 +13,34 @@ import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase/config';
 import { useRouter } from 'next/navigation';
 
+// EXTENDED ROLES
+type AppRole = 'super_admin' | 'hospital_admin' | 'hospital_staff' | 'patient' | 'receptionist' | 'doctor';
+
 interface UserData {
   uid: string;
   email: string;
-  role: 'super_admin' | 'hospital_admin' | 'patient';
+  role: AppRole; 
   hospitalId?: string;
+  staffRole?: string; 
+  department?: string;
   profile?: {
     firstName?: string;
     lastName?: string;
     phone?: string;
   };
   setupComplete?: boolean;
+  requirePasswordReset?: boolean;
+}
+export interface AuthUser {
+  uid: string;
+  email: string | null;
+  role: string;
+  hospitalId?: string;        // ← ADD THIS
+  department?: string;        // optional, if you have it
+  profile?: {
+    firstName?: string;
+    lastName?: string;
+  };
 }
 
 interface AuthContextType {
@@ -39,6 +55,32 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
+export function getRoleBasedRedirect(role: string, setupComplete: boolean = true): string {
+  const r = (role || '').toLowerCase().trim(); // ← THIS FIXES CAPITAL "Doctor"
+
+  if (!setupComplete) {
+    if (r === 'hospital_admin') return '/hospital/setup';
+    if (r === 'doctor' || r === 'receptionist' || r === 'hospital_staff') {
+      return '/hospital/staff/setup';
+    }
+  }
+
+  switch (r) {
+    case 'super_admin':
+      return '/admin/dashboard';
+    case 'hospital_admin':
+      return '/hospital/dashboard';
+    case 'doctor':
+      return '/hospital/doctor';           // ← NO trailing slash
+    case 'receptionist':
+      return '/hospital/receptionist';     // ← NO trailing slash
+    case 'patient':
+      return '/patient/dashboard';
+    default:
+      return '/auth/login';
+  }
+}
+
 export function useAuth() {
   return useContext(AuthContext);
 }
@@ -50,66 +92,60 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      console.log('Auth state changed:', user?.email);
-      setUser(user);
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      setUser(firebaseUser);
       
-      if (user) {
+      if (firebaseUser) {
         try {
-          // Create session cookie
-          const idToken = await user.getIdToken();
+          // 1. Create session cookie on the backend
+          const idToken = await firebaseUser.getIdToken();
           await fetch('/api/session/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ idToken }),
           });
-          
 
-          // Fetch user data from Firestore
-          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          // 2. Fetch user document
+          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           
           if (userDoc.exists()) {
             const data = userDoc.data() as UserData;
-            console.log('User data loaded:', data.role, data.setupComplete);
             setUserData(data);
-          } else {
-            // User document doesn't exist - create a default one
-            console.warn('User document not found, creating default document...');
-            
-            // Determine if this is a patient (self-registered) or admin (invited)
-            // Default to patient for self-registered users
-            const defaultUserData = {
-              uid: user.uid,
-              email: user.email!,
-              role: 'patient', // Default role
-              createdAt: new Date(),
-              setupComplete: true, // Patients don't need setup
-              profile: {
-                firstName: user.displayName?.split(' ')[0] || '',
-                lastName: user.displayName?.split(' ')[1] || '',
-              }
-            };
 
-            // Create user document
-            await setDoc(doc(db, 'users', user.uid), defaultUserData);
+            // NOTE: The primary redirection is now handled in the signIn function
+            // when the user explicitly logs in. We remove redundant redirects here
+            // to prevent race conditions and redirect loops.
+
+          } else {
+            // Fallback: create default patient profile if user exists but user doc does not
+            const defaultData: UserData = {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email!,
+              role: 'patient',
+              setupComplete: true,
+              profile: { firstName: '', lastName: '' }
+            };
             
-            // Create patient document
-            await setDoc(doc(db, 'patients', user.uid), {
-              userId: user.uid,
+            await setDoc(doc(db, 'users', firebaseUser.uid), defaultData);
+            await setDoc(doc(db, 'patients', firebaseUser.uid), {
+              userId: firebaseUser.uid,
               personalInfo: {},
               emergencyContact: {},
               medicalHistory: {},
               createdAt: new Date(),
             });
-
-            console.log('Default user document created');
-            setUserData(defaultUserData as UserData);
+            setUserData(defaultData);
+            // We still don't redirect here. The router protection on the client should handle this.
           }
-        } catch (error) {
-          console.error('Error in auth state change:', error);
+        } catch (err) {
+          console.error('Auth effect error (Failed to create session on change):', err);
+          // If the session creation fails here, we should probably sign out the user locally
+          // to prevent them from being stuck.
+          await firebaseSignOut(auth);
+          await fetch('/api/session/login', { method: 'DELETE' });
         }
       } else {
-        // Clear session cookie
+        // Clear session cookie on sign out
         await fetch('/api/session/login', { method: 'DELETE' });
         setUserData(null);
       }
@@ -122,98 +158,78 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = async (email: string, password: string) => {
     try {
-      const result = await signInWithEmailAndPassword(auth, email, password);
-      console.log('Sign in successful:', result.user.email);
-      
-      // Fetch user data
-      const userDoc = await getDoc(doc(db, 'users', result.user.uid));
-      if (!userDoc.exists()) {
-        throw new Error('User data not found');
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+
+      // Get ID token
+      const idToken = await user.getIdToken();
+
+      // Call backend to create session
+      const response = await fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+
+      if (!response.ok) {
+        // *** FIX: Read the actual error message from the backend response ***
+        const errorBody = await response.json().catch(() => ({ 
+            error: `Server Error ${response.status}` 
+        }));
+        
+        // Throw the most specific error message we can find
+        const backendError = errorBody.error || errorBody.message || `Failed to create session (HTTP ${response.status})`;
+        throw new Error(backendError);
       }
 
-      const data = userDoc.data() as UserData;
-      console.log('User role:', data.role, 'Setup complete:', data.setupComplete);
+      const data = await response.json();
       
-      // Wait a bit for state to update
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Get the correct redirect path based on role
+      const redirectPath = getRoleBasedRedirect(
+        data.role, 
+        data.setupComplete ?? true
+      );
       
+      // Hard redirect to role-specific dashboard
+      window.location.href = redirectPath;
       
-      // Redirect based on role and setup status
-      if (data.role === 'hospital_admin' && !data.setupComplete) {
-        console.log('Redirecting to hospital setup');
-        router.push('/hospital/setup');
-      } else if (data.role === 'super_admin') {
-        console.log('Redirecting to admin dashboard');
-        router.push('/admin/dashboard');
-      } else if (data.role === 'hospital_admin') {
-        console.log('Redirecting to hospital dashboard');
-        router.push('/hospital/dashboard');
-      } else if (data.role === 'patient') {
-        console.log('Redirecting to patient dashboard');
-        router.push('/patient/dashboard');
-      } else {
-        console.log('Unknown role, redirecting to home');
-        router.push('/');
-      }
-    } catch (error: any) {
-      console.error('Sign in error:', error);
-      throw error;
+    } catch (err: any) {
+      // Re-throw error so login screen can display it
+      throw err;
     }
   };
 
   const signUp = async (email: string, password: string, role: string) => {
-    try {
-      const result = await createUserWithEmailAndPassword(auth, email, password);
-      console.log('Sign up successful:', result.user.email);
-      
-      // Create user document
-      await setDoc(doc(db, 'users', result.user.uid), {
-        uid: result.user.uid,
-        email,
-        role,
+    const result = await createUserWithEmailAndPassword(auth, email, password);
+    await setDoc(doc(db, 'users', result.user.uid), {
+      uid: result.user.uid,
+      email,
+      role,
+      setupComplete: role === 'patient',
+      createdAt: new Date(),
+    });
+    if (role === 'patient') {
+      await setDoc(doc(db, 'patients', result.user.uid), {
+        userId: result.user.uid,
+        personalInfo: {},
+        emergencyContact: {},
+        medicalHistory: {},
         createdAt: new Date(),
-        setupComplete: role === 'patient', // Patients don't need setup
       });
-
-      // Create patient document if role is patient
-      if (role === 'patient') {
-        await setDoc(doc(db, 'patients', result.user.uid), {
-          userId: result.user.uid,
-          personalInfo: {},
-          emergencyContact: {},
-          medicalHistory: {},
-          createdAt: new Date(),
-        });
-      }
-
-      // Wait for state to update
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Redirect to patient dashboard
-      console.log('Redirecting to patient dashboard');
-      router.push('/patient/dashboard');
-    } catch (error: any) {
-      console.error('Sign up error:', error);
-      throw error;
     }
   };
 
   const signOut = async () => {
-    try {
-      await firebaseSignOut(auth);
-      await fetch('/api/session/login', { method: 'DELETE' });
-      console.log('Sign out successful');
-      router.push('/auth/login');
-    } catch (error) {
-      console.error('Sign out error:', error);
-    }
+    await firebaseSignOut(auth);
+    await fetch('/api/session/login', { method: 'DELETE' });
+    router.push('/auth/login');
   };
 
   const resetPassword = async (email: string) => {
     await sendPasswordResetEmail(auth, email);
   };
 
-  const value = {
+  const value: AuthContextType = {
     user,
     userData,
     loading,
@@ -225,7 +241,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider value={value}>
-      {children}
+      {!loading && children}
     </AuthContext.Provider>
   );
 }

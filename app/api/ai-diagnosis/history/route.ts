@@ -1,18 +1,21 @@
 // app/api/ai-diagnosis/history/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { verifyAuth } from "@/lib/utils/server-auth";
-import { adminDb } from "@/lib/firebase/admin";
+import { NextRequest, NextResponse } from 'next/server';
+import { verifyAuth } from '@/lib/utils/server-auth';
+import { adminDb } from '@/lib/firebase/admin';
 
 export async function GET(req: NextRequest) {
   try {
-    const decodedToken = await verifyAuth(req);
-    if (!decodedToken) {
+    // CORRECT WAY — extract session cookie first
+    const sessionCookie = req.cookies.get('session')?.value;
+    const decoded = await verifyAuth(sessionCookie);
+
+    if (!decoded) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const sessionsSnapshot = await adminDb
       .collection('diagnosisSessions')
-      .where('patientId', '==', decodedToken.uid)
+      .where('patientId', '==', decoded.uid)
       .orderBy('createdAt', 'desc')
       .limit(20)
       .get();
@@ -22,8 +25,8 @@ export async function GET(req: NextRequest) {
       return {
         id: doc.id,
         ...data,
-        createdAt: data.createdAt?.toDate().toISOString(),
-        completedAt: data.completedAt?.toDate().toISOString(),
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || null,
+        completedAt: data.completedAt?.toDate?.()?.toISOString() || null,
       };
     });
 

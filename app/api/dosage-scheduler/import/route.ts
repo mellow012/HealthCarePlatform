@@ -5,10 +5,12 @@ import { verifyAuth } from '@/lib/utils/server-auth';
 
 export async function POST(req: NextRequest) {
   try {
-    const decodedToken = await verifyAuth(req);
-    if (!decodedToken) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const sessionCookie = req.cookies.get('session')?.value;
+    const decoded = await verifyAuth(sessionCookie);
+
+if (!decoded) {
+  return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+}
 
     const { 
       recordId, 
@@ -36,10 +38,10 @@ export async function POST(req: NextRequest) {
     const totalDoses = dailyDoses * duration;
 
     // Create medication document
-    const medicationId = `med_${decodedToken.uid}_${Date.now()}`;
+    const medicationId = `med_${decoded.uid}_${Date.now()}`;
     const medicationDoc = {
       id: medicationId,
-      patientId: decodedToken.uid,
+      patientId: decoded.uid,
       name: medicationData.name,
       dosage: medicationData.dosage,
       frequency: mapFrequencyFromText(medicationData.frequency),
@@ -68,7 +70,7 @@ export async function POST(req: NextRequest) {
 
     // Audit log
     await adminDb.collection('auditLogs').add({
-      userId: decodedToken.uid,
+      userId: decoded.uid,
       action: 'MEDICATION_IMPORTED',
       resourceType: 'medication',
       resourceId: medicationId,

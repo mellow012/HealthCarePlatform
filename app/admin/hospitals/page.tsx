@@ -67,7 +67,7 @@ export default function HospitalsManagementPage() {
   const fetchHospitals = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/admin/hospitals');
+      const response = await fetch('/api/admin/hospital-admins');
       const data = await response.json();
 
       if (data.success) {

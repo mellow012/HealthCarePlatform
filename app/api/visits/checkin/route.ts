@@ -17,8 +17,7 @@ export async function POST(req: NextRequest) {
 
     const userData = userDoc.data()!;
 
-    // FIXED: Allow BOTH hospital_admin AND hospital_staff
-    const allowedRoles = ['hospital_admin', 'hospital_staff','receptionist'];
+    const allowedRoles = ['hospital_admin', 'hospital_staff', 'receptionist'];
     if (!allowedRoles.includes(userData.role) || !userData.hospitalId) {
       console.log('Check-in denied:', { role: userData.role, hospitalId: userData.hospitalId });
       return NextResponse.json({ error: 'Unauthorized or hospital not configured' }, { status: 403 });
@@ -44,6 +43,7 @@ export async function POST(req: NextRequest) {
     }
 
     const patientId = patientSnap.docs[0].id;
+    const patientData = patientSnap.docs[0].data();
 
     // Prevent double check-in
     const activeCheck = await adminDb
@@ -63,12 +63,12 @@ export async function POST(req: NextRequest) {
     const isFirstCheckIn = !passportDoc.exists || !passportDoc.data()?.isActive;
 
     if (isFirstCheckIn) {
-      await initializeEHealthPassport(patientId, staffHospitalId);
+      await initializeEHealthPassport(patientId, staffHospitalId, patientData);
     }
 
     // Create visit
     const visitId = `visit_${patientId}_${Date.now()}`;
-    const checkInTime = FieldValue.serverTimestamp();
+    const checkInTime = new Date();
 
     await adminDb.collection('visits').doc(visitId).set({
       id: visitId,
@@ -109,6 +109,91 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// Keep your helper functions exactly as they are — they’re perfect
-async function initializeEHealthPassport(patientId: string, hospitalId: string) { /* ... your code ... */ }
-async function updateVisitHistory(patientId: string, hospitalId: string) { /* ... your code ... */ }
+// Initialize E-Health Passport on first check-in
+async function initializeEHealthPassport(
+  patientId: string, 
+  hospitalId: string,
+  patientData: any
+) {
+  const now = new Date();
+  
+  const passportData = {
+    patientId,
+    isActive: true,
+    activatedAt: now,
+    activatedBy: hospitalId,
+    
+    // Personal Information (from user profile)
+    personalInfo: {
+      firstName: patientData?.profile?.firstName || '',
+      lastName: patientData?.profile?.lastName || '',
+      dateOfBirth: patientData?.profile?.dateOfBirth || null,
+      bloodType: patientData?.profile?.bloodType || null,
+      gender: patientData?.profile?.gender || null,
+      phone: patientData?.profile?.phone || null,
+      email: patientData?.email || '',
+    },
+    
+    // Medical Records (initially empty)
+    diagnoses: [],
+    prescriptions: [],
+    allergies: [],
+    vaccinations: [],
+    labResults: [],
+    
+    // Consent
+    consent: {
+      dataSharing: true, // Patient agreed during first check-in
+      emergencyAccess: true,
+      researchParticipation: false,
+    },
+    
+    // Visit History
+    visitHistory: [{
+      hospitalId,
+      firstVisit: now,
+      lastVisit: now,
+      totalVisits: 1,
+    }],
+    
+    // Metadata
+    createdAt: now,
+    updatedAt: now,
+    version: '1.0',
+  };
+
+  await adminDb.collection('eHealthPassports').doc(patientId).set(passportData);
+}
+
+// Update visit history in passport
+async function updateVisitHistory(patientId: string, hospitalId: string) {
+  const passportRef = adminDb.collection('eHealthPassports').doc(patientId);
+  const passportDoc = await passportRef.get();
+  
+  if (!passportDoc.exists) return;
+  
+  const data = passportDoc.data()!;
+  const visitHistory = data.visitHistory || [];
+  
+  // Find or create hospital entry
+  const hospitalIndex = visitHistory.findIndex((h: any) => h.hospitalId === hospitalId);
+  
+  if (hospitalIndex >= 0) {
+    // Update existing
+    visitHistory[hospitalIndex].lastVisit = new Date();
+    visitHistory[hospitalIndex].totalVisits += 1;
+  } else {
+    // Add new
+    visitHistory.push({
+      hospitalId,
+      firstVisit: new Date(),
+      lastVisit: new Date(),
+      totalVisits: 1,
+    });
+  }
+  
+  await passportRef.update({
+    visitHistory,
+    updatedAt: new Date(),
+  });
+}

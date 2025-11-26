@@ -35,6 +35,12 @@ interface Visit {
     address: object;
   };
 }
+interface StatCardProps {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  value: number | string;
+  color: 'blue' | 'green' | 'yellow';
+}
 
 interface PassportStatus {
   isActive: boolean;
@@ -59,36 +65,41 @@ export default function PatientDashboard() {
     fetchData();
   }, [searchQuery]);
 
-  const fetchData = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      // Fetch visits
-      const visitsRes = await fetch('/api/patient/visits');
-      const visitsData = await visitsRes.json();
-      if (!visitsRes.ok) throw new Error(visitsData.error || 'Failed to fetch visits');
-      setVisits(visitsData.data || []);
+ const fetchData = async () => {
+  setLoading(true);
+  setError('');
+  try {
+    // Fetch visits
+    const visitsRes = await fetch('/api/patient/visits');
+    const visitsData = await visitsRes.json();
+    if (!visitsRes.ok) throw new Error(visitsData.error || 'Failed to fetch visits');
+    setVisits(visitsData.data || []);
 
-      // Fetch passport status
-      const passportRes = await fetch('/api/patient/ehealth-passport');
-      const passportData = await passportRes.json();
-      if (!passportRes.ok) {
-        setPassport(null);
-      } else if (passportData.success) {
-        setPassport(passportData.data);
-      }
+    // FETCH PASSPORT WITH isActive FLAG
+    const passportRes = await fetch('/api/patient/ehealth-passport');
+    const passportData = await passportRes.json();
 
-      // Fetch available hospitals (filtered by search) - FIXED: /api/hospitals
-      const hospitalsRes = await fetch(`/api/hospital?search=${encodeURIComponent(searchQuery)}`);
-      const hospitalsData = await hospitalsRes.json();
-      if (!hospitalsRes.ok) throw new Error(hospitalsData.error || 'Failed to fetch hospitals');
-      setAvailableHospitals(hospitalsData.data || []);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
+    if (passportRes.ok && passportData.success) {
+      setPassport({
+        isActive: passportData.data.isActive || false,
+        activatedAt: passportData.data.activatedAt,
+        consent: { dataSharing: true, emergencyAccess: true },
+      });
+    } else {
+      setPassport(null);
     }
-  };
+
+    // Fetch hospitals
+    const hospitalsRes = await fetch(`/api/hospital?search=${encodeURIComponent(searchQuery)}`);
+    const hospitalsData = await hospitalsRes.json();
+    if (!hospitalsRes.ok) throw new Error(hospitalsData.error || 'Failed to fetch hospitals');
+    setAvailableHospitals(hospitalsData.data || []);
+  } catch (err: any) {
+    setError(err.message);
+  } finally {
+    setLoading(false);
+  }
+};
 
   const getStatusIcon = (status: string) => {
     return status === 'checked_in' ? (
@@ -230,7 +241,7 @@ export default function PatientDashboard() {
             {/* Dosage Scheduler Card */}
             <div 
               className="bg-white rounded-xl shadow p-6 hover:shadow-lg transition-shadow cursor-pointer" 
-              onClick={() => router.push('/patient/dosage-scheduler')}
+              onClick={() => router.push('/patient/dosage-scheduler/overview')}
             >
               <div className="flex items-center justify-between">
                 <div>
@@ -409,21 +420,22 @@ export default function PatientDashboard() {
 }
 
 // StatCard (same as before)
-const StatCard = ({ icon: Icon, title, value, color }: any) => {
+const StatCard = ({ icon: Icon, title, value, color }: StatCardProps) => {
   const colorClasses = {
     blue: 'bg-blue-100 text-blue-600',
     green: 'bg-green-100 text-green-600',
     yellow: 'bg-yellow-100 text-yellow-600',
-  };
+  } as const;
+
   return (
     <div className="bg-white rounded-xl shadow p-6">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-medium text-gray-600">{title}</p>
-          <p className="text-sm font-bold text-gray-900 mt-1">{value}</p>
+          <p className="text-3xl font-bold text-gray-900 mt-1">{value}</p>
         </div>
-        <div className={`p-3 rounded-full ${colorClasses[color]}`}>
-          <Icon className="w-12 h-12" />
+        <div className={`p-4 rounded-full ${colorClasses[color]}`}>
+          <Icon className="w-10 h-10" />
         </div>
       </div>
     </div>
